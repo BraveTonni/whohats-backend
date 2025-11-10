@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>WebRTC Demo</title>
+<style>
+video { width: 45%; margin: 10px; border: 1px solid black; }
+</style>
+</head>
+<body>
+<h2>Локальное видео</h2>
+<video id="localVideo" autoplay muted></video>
+
+<h2>Удаленное видео</h2>
+<video id="remoteVideo" autoplay></video>
+
+<script>
+const userId = crypto.randomUUID();
+const ws = new WebSocket(`ws://localhost:8000/api/ws?user_id=${userId}`);
+
+const localVideo = document.getElementById('localVideo');
+const remoteVideo = document.getElementById('remoteVideo');
+
+let pc = new RTCPeerConnection({
+    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+});
+
+let remoteICEBuffer = [];
+
+// Подключаем удаленное видео
+pc.ontrack = event => {
+    remoteVideo.srcObject = event.streams[0];
+};
+
+// ICE кандидаты
+pc.onicecandidate = event => {
+    if (event.candidate) {
+        ws.send(JSON.stringify({
+            type: "webrtc",
+            params: { candidate: event.candidate }
+        }));
+    }
+};
+
+// Получаем локальное видео и аудио
+navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+.then(stream => {
+    localVideo.srcObject = stream;
+    stream.getTracks().forEach(track => pc.addTrack(track, stream));
+})
+.catch(err => console.error('Ошибка доступа к камере/микрофону:', err));
+
+// Обработка сообщений WebSocket
+ws.onmessage = async (event) => {
+    const message = JSON.parse(event.data);
+
+    if (message.type !== "webrtc") return;
+
+    const params = message.params || {};
+
+    if (params.sdp) {
+        const desc = new RTCSessionDescription(params.sdp);
+        await pc.setRemoteDescription(desc);
+
+        // Если пришёл offer, создаём answer
+        if (desc.type === "offer") {
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            ws.send(JSON.stringify({
+                type: "webrtc",
+                params: { sdp: answer }
+            }));
+        }
+    } else if (params.candidate) {
+        const candidate = new RTCIceCandidate(params.candidate);
+        if (pc.remoteDescription) {
+            await pc.addIceCandidate(candidate);
+        } else {
+            remoteICEBuffer.push(candidate);
+        }
+    } else if (params.action) {
+        // Тут можно обрабатывать call_request, call_accept, call_end и т.д.
+        console.log("WebRTC action:", params.action);
+    }
+};
+
+// Создаем offer после подключения WS и добавления треков
+ws.onopen = async () => {
+    const checkTracks = setInterval(async () => {
+        if (pc.getSenders().length > 0) {
+            clearInterval(checkTracks);
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            ws.send(JSON.stringify({
+                type: "webrtc",
+                params: { sdp: offer }
+            }));
+        }
+    }, 100);
+};
+</script>
+</body>
+</html>
